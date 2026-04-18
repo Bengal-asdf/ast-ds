@@ -1,9 +1,9 @@
 import click
+
 from . import config as cfg
-from . import scanner
-from . import reporter
-from .sast import analyzer
+from . import reporter, scanner
 from .dast import mutator
+from .sast import analyzer
 
 
 @click.group()

@@ -1,23 +1,24 @@
 from rich.console import Console
-from rich.text import Text
 from rich.rule import Rule
-from .scanner import Endpoint
-from .sast.analyzer import Finding, Severity
+from rich.text import Text
+
 from .dast.mutator import DastResult, Status
+from .sast.analyzer import Finding, Severity
+from .scanner import Endpoint
 
 console = Console()
 
 SEVERITY_COLORS = {
     Severity.CRITICAL: "red",
-    Severity.HIGH:     "orange3",
-    Severity.MEDIUM:   "yellow",
-    Severity.LOW:      "dim",
+    Severity.HIGH: "orange3",
+    Severity.MEDIUM: "yellow",
+    Severity.LOW: "dim",
 }
 
 STATUS_COLORS = {
-    Status.CONFIRMED:  "red",
-    Status.POTENTIAL:  "yellow",
-    Status.NOT_FOUND:  "green",
+    Status.CONFIRMED: "red",
+    Status.POTENTIAL: "yellow",
+    Status.NOT_FOUND: "green",
 }
 
 STATUS_LABELS = {
@@ -29,14 +30,18 @@ STATUS_LABELS = {
 
 def print_header():
     console.print()
-    console.print(Text("ast-ds v0.1.0", style="bold white"), "—",
-                  Text("Application Security Testing", style="dim"))
+    console.print(
+        Text("ast-ds v0.1.0", style="bold white"),
+        "—",
+        Text("Application Security Testing", style="dim"),
+    )
     console.print()
 
 
 def print_scanning(total: int):
-    console.print(f"[dim]Detectando endpoints...[/dim] "
-                  f"[bold]{total}[/bold] encontrados\n")
+    console.print(
+        f"[dim]Detectando endpoints...[/dim] " f"[bold]{total}[/bold] encontrados\n"
+    )
     console.print("[dim]Analizando endpoints...[/dim]")
 
 
@@ -80,8 +85,7 @@ def print_summary(
 ):
     total_vulns = sum(len(f) for f in all_findings)
     total_confirmed = sum(
-        1 for results in all_dast
-        for r in results if r.status == Status.CONFIRMED
+        1 for results in all_dast for r in results if r.status == Status.CONFIRMED
     )
 
     console.print()
@@ -132,9 +136,7 @@ def print_summary(
                     f"      [dim]evidencia:[/dim] [italic dim]{finding.evidence[:80]}[/italic dim]"
                 )
 
-            console.print(
-                f"      [dim]OWASP: {finding.owasp}[/dim]"
-            )
+            console.print(f"      [dim]OWASP: {finding.owasp}[/dim]")
 
     console.print(Rule(style="dim"))
 
@@ -144,11 +146,16 @@ def print_error(message: str):
 
 
 def print_no_endpoints():
-    console.print("\n[yellow]No se encontraron endpoints FastAPI en el target.[/yellow]")
-    console.print("[dim]Verifica que el archivo o carpeta contiene rutas decoradas con @router o @app.[/dim]\n")
+    console.print(
+        "\n[yellow]No se encontraron endpoints FastAPI en el target.[/yellow]"
+    )
+    console.print(
+        "[dim]Verifica que el archivo o carpeta contiene rutas decoradas con @router o @app.[/dim]\n"
+    )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def _progress_bar(current: int, total: int, width: int = 8) -> str:
     filled = int((current / total) * width)
@@ -158,10 +165,10 @@ def _progress_bar(current: int, total: int, width: int = 8) -> str:
 
 def _method_color(method: str) -> str:
     colors = {
-        "GET":    "green",
-        "POST":   "blue",
-        "PUT":    "yellow",
-        "PATCH":  "yellow",
+        "GET": "green",
+        "POST": "blue",
+        "PUT": "yellow",
+        "PATCH": "yellow",
         "DELETE": "red",
     }
     return colors.get(method.upper(), "white")

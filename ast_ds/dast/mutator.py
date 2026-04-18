@@ -1,15 +1,17 @@
-import httpx
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
-from ..scanner import Endpoint
+
+import httpx
+
 from ..sast.analyzer import Finding, Severity
+from ..scanner import Endpoint
 
 
 class Status(str, Enum):
-    CONFIRMED   = "CONFIRMADO"
-    POTENTIAL   = "POTENCIAL"
-    NOT_FOUND   = "NO_DETECTADO"
+    CONFIRMED = "CONFIRMADO"
+    POTENTIAL = "POTENCIAL"
+    NOT_FOUND = "NO_DETECTADO"
 
 
 @dataclass
@@ -61,6 +63,7 @@ RESOURCE_PAYLOADS = [
 
 # ── Punto de entrada ──────────────────────────────────────────────────────────
 
+
 def mutate(
     endpoint: Endpoint,
     findings: list[Finding],
@@ -85,6 +88,7 @@ def mutate(
 
 # ── Dispatcher por regla ──────────────────────────────────────────────────────
 
+
 def _run_rule(
     client: httpx.Client,
     url: str,
@@ -98,13 +102,14 @@ def _run_rule(
     if finding.rule_id == "SAST-003":
         return _test_input_validation(client, url, endpoint, finding)
     if finding.rule_id == "SAST-004":
-        return []   # Secret hardcodeado: no requiere request, ya confirmado por SAST
+        return []  # Secret hardcodeado: no requiere request, ya confirmado por SAST
     if finding.rule_id == "SAST-005":
-        return []   # Manejo de excepciones: no requiere request
+        return []  # Manejo de excepciones: no requiere request
     return []
 
 
 # ── DAST-001: SQL Injection ───────────────────────────────────────────────────
+
 
 def _test_sql_injection(
     client: httpx.Client,
@@ -115,31 +120,39 @@ def _test_sql_injection(
     results = []
 
     for payload_value in SQL_PAYLOADS:
-        body = {arg: payload_value for arg in endpoint.args} if endpoint.args else {"q": payload_value}
+        body = (
+            {arg: payload_value for arg in endpoint.args}
+            if endpoint.args
+            else {"q": payload_value}
+        )
 
         try:
             response = _send(client, endpoint.method, url, body)
             status = _evaluate_sql_response(response)
-            results.append(DastResult(
-                endpoint=endpoint,
-                finding=finding,
-                status=status,
-                payload=body,
-                status_code=response.status_code,
-                response_snippet=response.text[:200],
-            ))
+            results.append(
+                DastResult(
+                    endpoint=endpoint,
+                    finding=finding,
+                    status=status,
+                    payload=body,
+                    status_code=response.status_code,
+                    response_snippet=response.text[:200],
+                )
+            )
 
             if status == Status.CONFIRMED:
                 break
 
         except httpx.RequestError as e:
-            results.append(DastResult(
-                endpoint=endpoint,
-                finding=finding,
-                status=Status.NOT_FOUND,
-                payload=body,
-                error=str(e),
-            ))
+            results.append(
+                DastResult(
+                    endpoint=endpoint,
+                    finding=finding,
+                    status=Status.NOT_FOUND,
+                    payload=body,
+                    error=str(e),
+                )
+            )
             break
 
     return results
@@ -147,8 +160,15 @@ def _test_sql_injection(
 
 def _evaluate_sql_response(response: httpx.Response) -> Status:
     error_indicators = (
-        "sql", "syntax", "mysql", "postgresql", "sqlite",
-        "ora-", "unclosed", "unterminated", "unexpected token",
+        "sql",
+        "syntax",
+        "mysql",
+        "postgresql",
+        "sqlite",
+        "ora-",
+        "unclosed",
+        "unterminated",
+        "unexpected token",
     )
     body_lower = response.text.lower()
 
@@ -166,6 +186,7 @@ def _evaluate_sql_response(response: httpx.Response) -> Status:
 
 # ── DAST-002: Autenticación ───────────────────────────────────────────────────
 
+
 def _test_missing_auth(
     client: httpx.Client,
     url: str,
@@ -180,26 +201,30 @@ def _test_missing_auth(
         try:
             response = _send(client, endpoint.method, url, body, headers=headers)
             status = _evaluate_auth_response(response)
-            results.append(DastResult(
-                endpoint=endpoint,
-                finding=finding,
-                status=status,
-                payload={"headers": headers, "body": body},
-                status_code=response.status_code,
-                response_snippet=response.text[:200],
-            ))
+            results.append(
+                DastResult(
+                    endpoint=endpoint,
+                    finding=finding,
+                    status=status,
+                    payload={"headers": headers, "body": body},
+                    status_code=response.status_code,
+                    response_snippet=response.text[:200],
+                )
+            )
 
             if status == Status.CONFIRMED:
                 break
 
         except httpx.RequestError as e:
-            results.append(DastResult(
-                endpoint=endpoint,
-                finding=finding,
-                status=Status.NOT_FOUND,
-                payload={"headers": headers},
-                error=str(e),
-            ))
+            results.append(
+                DastResult(
+                    endpoint=endpoint,
+                    finding=finding,
+                    status=Status.NOT_FOUND,
+                    payload={"headers": headers},
+                    error=str(e),
+                )
+            )
             break
 
     return results
@@ -217,6 +242,7 @@ def _evaluate_auth_response(response: httpx.Response) -> Status:
 
 # ── DAST-003: Validación de entrada ──────────────────────────────────────────
 
+
 def _test_input_validation(
     client: httpx.Client,
     url: str,
@@ -226,28 +252,36 @@ def _test_input_validation(
     results = []
 
     for payload_value in FUZZING_PAYLOADS[:4]:
-        body = {arg: payload_value for arg in endpoint.args} if endpoint.args else {"data": payload_value}
+        body = (
+            {arg: payload_value for arg in endpoint.args}
+            if endpoint.args
+            else {"data": payload_value}
+        )
 
         try:
             response = _send(client, endpoint.method, url, body)
             status = _evaluate_validation_response(response)
-            results.append(DastResult(
-                endpoint=endpoint,
-                finding=finding,
-                status=status,
-                payload=body,
-                status_code=response.status_code,
-                response_snippet=response.text[:200],
-            ))
+            results.append(
+                DastResult(
+                    endpoint=endpoint,
+                    finding=finding,
+                    status=status,
+                    payload=body,
+                    status_code=response.status_code,
+                    response_snippet=response.text[:200],
+                )
+            )
 
         except httpx.RequestError as e:
-            results.append(DastResult(
-                endpoint=endpoint,
-                finding=finding,
-                status=Status.NOT_FOUND,
-                payload=body,
-                error=str(e),
-            ))
+            results.append(
+                DastResult(
+                    endpoint=endpoint,
+                    finding=finding,
+                    status=Status.NOT_FOUND,
+                    payload=body,
+                    error=str(e),
+                )
+            )
             break
 
     return results
@@ -264,6 +298,7 @@ def _evaluate_validation_response(response: httpx.Response) -> Status:
 
 
 # ── HTTP helper ───────────────────────────────────────────────────────────────
+
 
 def _send(
     client: httpx.Client,

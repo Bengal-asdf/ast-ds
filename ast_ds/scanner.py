@@ -1,9 +1,9 @@
 import ast
-from pathlib import Path
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
-from .config import Config
 
+from .config import Config
 
 HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head"}
 
@@ -58,15 +58,17 @@ def _scan_file(file: Path) -> list[Endpoint]:
             args = _extract_args(node)
             func_source = _extract_function_source(lines, node)
 
-            endpoints.append(Endpoint(
-                method=method.upper(),
-                path=route_path,
-                function_name=node.name,
-                source_file=file,
-                lineno=node.lineno,
-                args=args,
-                source_code=func_source,
-            ))
+            endpoints.append(
+                Endpoint(
+                    method=method.upper(),
+                    path=route_path,
+                    function_name=node.name,
+                    source_file=file,
+                    lineno=node.lineno,
+                    args=args,
+                    source_code=func_source,
+                )
+            )
 
     return endpoints
 

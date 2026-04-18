@@ -1,8 +1,10 @@
-import yaml
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
+
+import yaml
 
 CONFIG_FILE = "config.yaml"
+
 
 @dataclass
 class Config:
