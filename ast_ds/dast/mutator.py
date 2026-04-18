@@ -231,7 +231,7 @@ def _test_missing_auth(
 
 
 def _evaluate_auth_response(response: httpx.Response) -> Status:
-    if response.status_code in (200, 201):
+    if response.status_code in (200, 201, 422):
         return Status.CONFIRMED
     if response.status_code in (401, 403):
         return Status.NOT_FOUND

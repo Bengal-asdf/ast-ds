@@ -1,4 +1,12 @@
 from rich.console import Console
+from rich.live import Live
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
 from rich.rule import Rule
 from rich.text import Text
 
@@ -6,12 +14,12 @@ from .dast.mutator import DastResult, Status
 from .sast.analyzer import Finding, Severity
 from .scanner import Endpoint
 
-console = Console()
+console = Console(highlight=False)
 
 SEVERITY_COLORS = {
-    Severity.CRITICAL: "red",
-    Severity.HIGH: "orange3",
-    Severity.MEDIUM: "yellow",
+    Severity.CRITICAL: "bold red",
+    Severity.HIGH: "bold orange3",
+    Severity.MEDIUM: "bold yellow",
     Severity.LOW: "dim",
 }
 
@@ -27,22 +35,47 @@ STATUS_LABELS = {
     Status.NOT_FOUND: "NO DETECTADO",
 }
 
+_route_width = 50
+
 
 def print_header():
     console.print()
     console.print(
-        Text("ast-ds v0.1.0", style="bold white"),
-        "—",
-        Text("Application Security Testing", style="dim"),
+        Text("ast-ds v0.1.0", style="bold white")
+        + Text(" — Application Security Testing", style="dim")
     )
     console.print()
 
 
-def print_scanning(total: int):
+def print_scanning(total: int, endpoints: list[Endpoint] = []):
+    global _route_width
+    if endpoints:
+        max_len = max(len(f"{ep.method} {ep.path}") for ep in endpoints)
+        _route_width = max_len + 4
+
     console.print(
-        f"[dim]Detectando endpoints...[/dim] " f"[bold]{total}[/bold] encontrados\n"
+        Text("Detectando endpoints... ", style="dim")
+        + Text(str(total), style="bold")
+        + Text(" encontrados", style="dim")
     )
-    console.print("[dim]Analizando endpoints...[/dim]")
+    console.print()
+
+
+def make_progress() -> Progress:
+    return Progress(
+        SpinnerColumn(spinner_name="dots", style="blue"),
+        TextColumn("[bold]{task.description}"),
+        BarColumn(
+            bar_width=30,
+            complete_style="blue",
+            finished_style="green",
+            pulse_style="dim blue",
+        ),
+        TextColumn("[dim]{task.percentage:>3.0f}%"),
+        TimeElapsedColumn(),
+        console=console,
+        transient=False,
+    )
 
 
 def print_endpoint_progress(
@@ -51,31 +84,30 @@ def print_endpoint_progress(
     dast_results: list[DastResult],
     current: int,
     total: int,
+    progress: Progress = None,
+    task_id=None,
 ):
-    percent = int((current / total) * 100)
-    bar = _progress_bar(current, total)
+    if progress is None or task_id is None:
+        return
 
     vuln_count = len(findings)
-    confirmed = sum(1 for r in dast_results if r.status == Status.CONFIRMED)
-
-    if vuln_count == 0:
-        vuln_text = Text("0 vulnerabilidades", style="green")
-    else:
-        label = f"{vuln_count} vulnerabilidad{'es' if vuln_count > 1 else ''}"
-        if confirmed > 0:
-            label += f" ({confirmed} confirmada{'s' if confirmed > 1 else ''})"
-        vuln_text = Text(label, style="red")
-
-    method_style = _method_color(endpoint.method)
+    method_color = _method_color(endpoint.method)
     route = f"{endpoint.method} {endpoint.path}"
 
-    line = Text()
-    line.append(f"{route:<40}", style=method_style)
-    line.append(" ")
-    line.append(vuln_text)
-    line.append(f" {bar} {percent}%", style="dim")
+    if vuln_count == 0:
+        vuln_label = Text(" 0 vulnerabilidades", style="green")
+    else:
+        label = f" {vuln_count} vulnerabilidad{'es' if vuln_count > 1 else ''}"
+        vuln_label = Text(label, style="red")
 
-    console.print(line)
+    desc = Text(f"{route:<{_route_width}}", style=method_color)
+    desc.append_text(vuln_label)
+
+    progress.update(
+        task_id,
+        description=desc.plain,
+        completed=current,
+    )
 
 
 def print_summary(
@@ -91,14 +123,18 @@ def print_summary(
     console.print()
     console.print(Rule(style="dim"))
 
-    console.print(
-        f"Endpoints analizados: [bold]{len(endpoints)}[/bold]  |  "
-        f"Vulnerabilidades detectadas: [bold]{total_vulns}[/bold]  |  "
-        f"Confirmadas: [bold red]{total_confirmed}[/bold red]"
-    )
+    summary = Text()
+    summary.append("Endpoints analizados: ", style="dim")
+    summary.append(str(len(endpoints)), style="bold")
+    summary.append("  |  Vulnerabilidades detectadas: ", style="dim")
+    summary.append(str(total_vulns), style="bold")
+    summary.append("  |  Confirmadas: ", style="dim")
+    summary.append(str(total_confirmed), style="bold red")
+    console.print(summary)
 
     if total_vulns == 0:
-        console.print("\n[green bold]Sin vulnerabilidades detectadas.[/green bold]")
+        console.print()
+        console.print(Text("Sin vulnerabilidades detectadas.", style="bold green"))
         console.print(Rule(style="dim"))
         return
 
@@ -108,11 +144,11 @@ def print_summary(
         if not findings:
             continue
 
-        method_style = _method_color(endpoint.method)
-        console.print(
-            Text(f"  {endpoint.method}", style=f"bold {method_style}"),
-            Text(f" {endpoint.path}", style="bold"),
-        )
+        method_color = _method_color(endpoint.method)
+        header = Text()
+        header.append(f"  {endpoint.method}", style=f"bold {method_color}")
+        header.append(f" {endpoint.path}", style="bold white")
+        console.print(header)
 
         dast_map = {r.finding.rule_id: r for r in dast_results}
 
@@ -121,7 +157,7 @@ def print_summary(
             dast = dast_map.get(finding.rule_id)
 
             line = Text()
-            line.append(f"    [{finding.severity.value}]", style=f"bold {sev_color}")
+            line.append(f"    [{finding.severity.value}]", style=sev_color)
             line.append(f" {finding.title}", style="white")
 
             if dast:
@@ -133,34 +169,33 @@ def print_summary(
 
             if finding.evidence:
                 console.print(
-                    f"      [dim]evidencia:[/dim] [italic dim]{finding.evidence[:80]}[/italic dim]"
+                    Text("      evidencia: ", style="dim")
+                    + Text(finding.evidence[:80], style="italic dim")
                 )
 
-            console.print(f"      [dim]OWASP: {finding.owasp}[/dim]")
+            console.print(Text(f"      OWASP: {finding.owasp}", style="dim"))
 
     console.print(Rule(style="dim"))
 
 
 def print_error(message: str):
-    console.print(f"\n[bold red]Error:[/bold red] {message}\n")
+    console.print()
+    console.print(Text("Error: ", style="bold red") + Text(message, style="white"))
+    console.print()
 
 
 def print_no_endpoints():
+    console.print()
     console.print(
-        "\n[yellow]No se encontraron endpoints FastAPI en el target.[/yellow]"
+        Text("No se encontraron endpoints FastAPI en el target.", style="yellow")
     )
     console.print(
-        "[dim]Verifica que el archivo o carpeta contiene rutas decoradas con @router o @app.[/dim]\n"
+        Text(
+            "Verifica que el archivo contiene rutas decoradas con @router o @app.",
+            style="dim",
+        )
     )
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-
-def _progress_bar(current: int, total: int, width: int = 8) -> str:
-    filled = int((current / total) * width)
-    empty = width - filled
-    return f"[green]{'█' * filled}[/green][dim]{'░' * empty}[/dim]"
+    console.print()
 
 
 def _method_color(method: str) -> str:

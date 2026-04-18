@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 import yaml
 
@@ -11,6 +12,7 @@ class Config:
     target: Path
     base_url: str
     is_dir: bool
+    prefix: str = ""
 
 
 def load_config() -> Config:
@@ -49,9 +51,11 @@ def load_config() -> Config:
         )
 
     base_url = str(data["base_url"]).rstrip("/")
+    prefix = str(data.get("prefix", "")).rstrip("/")
 
     return Config(
         target=target_path,
         base_url=base_url,
         is_dir=is_dir,
+        prefix=prefix,
     )
