@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ast-ds"
+version = "0.1.0"
+description = "Application Security Testing — Dynamic Static for FastAPI endpoints"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "Michael Soncco Ramos" }
+]
+keywords = ["security", "fastapi", "sast", "dast", "owasp", "testing"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Security",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+dependencies = [
+    "httpx>=0.27.0",        # HTTP requests para el módulo DAST
+    "pyyaml>=6.0",          # Lectura del config.yaml
+    "rich>=13.7.0",         # Output en consola (barras de progreso)
+    "click>=8.0.0",        # CLI (ast-ds run)
+]
+
+[project.scripts]
+ast-ds = "ast_ds.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ast_ds*"]
+
+[project.urls]
+Repository = "https://github.com/michaelsoncco/ast-ds"

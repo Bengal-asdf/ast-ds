@@ -1,0 +1,69 @@
+{
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+    // basic file settings
+    "files.insertFinalNewline": true,
+    "files.trimFinalNewlines": true,
+    "files.trimTrailingWhitespace": true,
+    "editor.minimap.enabled": false,
+
+    // "isort.args": ["--profile", "black"],
+    // pylance
+    "python.analysis.typeCheckingMode": "basic",
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}"
+    ],
+    "python.analysis.logLevel": "Trace",
+    "python.analysis.diagnosticMode": "workspace",
+    "python.analysis.diagnosticSeverityOverrides": {
+        "reportCallIssue": false,
+        "reportArgumentType": false
+    },
+    "python.analysis.exclude": [
+        "**/pocs**",
+        "**/.venv**"
+    ],
+    "files.associations": {
+        "*.env": "dotenv",
+        "*.env.*": "dotenv",
+        "*.json.sample": "jsonc"
+    },
+
+    //"editor.formatOnSave": false,
+    "[python]": {
+        "editor.rulers": [
+            88
+        ],
+        "editor.detectIndentation": false,
+        "editor.insertSpaces": true,
+        "editor.tabSize": 4,
+        // black
+        "editor.formatOnSave": true,
+        "editor.formatOnSaveMode": "file",
+
+        // isort
+        "editor.codeActionsOnSave": {
+            "source.organizeImports": "explicit"
+            // "source.unusedImports": "explicit",
+        }
+    },
+    "files.exclude": {
+        "**/.venv**": true,
+        // "**/__init__.py": true,
+        "**/venv**": true,
+        "**/__pycache__": true,
+        "**/.pytest_cache/**": true,
+        "**/node_modules/**": true,
+        ".vscode/*.log": true
+    },
+
+    "search.exclude": {
+        "**/.venv**": true,
+        // "**/__init__.py": true,
+        "**/venv**": true,
+        "**/__pycache__": true,
+        "**/.pytest_cache/**": true,
+        "**/node_modules/**": true,
+        ".vscode/*.log": true
+    }
+
+}
