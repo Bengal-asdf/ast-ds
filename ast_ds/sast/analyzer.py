@@ -45,6 +45,8 @@ def analyze(endpoint: Endpoint) -> list[Finding]:
     findings.extend(_check_function_level_auth(tree, endpoint))
     findings.extend(_check_ssrf(tree))
     findings.extend(_check_inventory(tree, endpoint))
+    findings.extend(_check_sensitive_business_flow(tree, endpoint))
+    findings.extend(_check_unsafe_api_consumption(tree, endpoint))
 
     return findings
 
@@ -515,6 +517,125 @@ def _check_inventory(tree: ast.AST, endpoint: Endpoint) -> list[Finding]:
                 lineno=1,
                 owasp="API9:2023 — Improper Inventory Management",
                 evidence=f"Segmento detectado: /{segment}",
+            )
+        )
+
+    return findings
+
+
+# ── REGLA 11: Unrestricted Access to Sensitive Business Flows (API6:2023) ─────
+def _check_sensitive_business_flow(tree: ast.AST, endpoint: Endpoint) -> list[Finding]:
+    """
+    Detecta endpoints que exponen flujos de negocio críticos (registro masivo,
+    exportación de datos, generación de reportes, operaciones batch) sin controles
+    de rate limiting, throttling o anti-abuso detectables en el código.
+    """
+    findings = []
+
+    # Patrones en la ruta que indican flujo de negocio sensible
+    sensitive_path_patterns = re.compile(
+        r"/(register|signup|export|report|bulk|batch|import|"
+        r"download|generate|upload|send|notify|subscribe|checkout|order|invoice)",
+        re.IGNORECASE,
+    )
+
+    if not sensitive_path_patterns.search(endpoint.path):
+        return []
+
+    source_lower = (endpoint.source_code or "").lower()
+
+    # Indicadores de rate limiting o throttling
+    rate_limit_indicators = (
+        "ratelimit",
+        "rate_limit",
+        "throttle",
+        "slowapi",
+        "limiter",
+        "x-ratelimit",
+        "too_many_requests",
+        "429",
+        "cooldown",
+        "backoff",
+        "max_attempts",
+        "captcha",
+        "recaptcha",
+    )
+
+    has_rate_limit = any(ind in source_lower for ind in rate_limit_indicators)
+
+    if not has_rate_limit:
+        match = sensitive_path_patterns.search(endpoint.path)
+        segment = match.group(1) if match else endpoint.path
+
+        findings.append(
+            Finding(
+                rule_id="SAST-011",
+                title="Flujo de negocio sensible sin control de rate limiting",
+                description=(
+                    f"El endpoint '{endpoint.path}' expone un flujo de negocio crítico "
+                    f"('{segment}') sin controles de rate limiting, throttling o "
+                    "mecanismos anti-abuso detectables. Un atacante podría automatizar "
+                    "solicitudes masivas para abusar del flujo."
+                ),
+                severity=Severity.HIGH,
+                lineno=1,
+                owasp="API6:2023 — Unrestricted Access to Sensitive Business Flows",
+                evidence=f"Ruta sensible: {endpoint.path} | Sin rate limiting detectado",
+            )
+        )
+
+    return findings
+
+
+# ── REGLA 12: Unsafe Consumption of APIs (API10:2023) ────────────────────────
+def _check_unsafe_api_consumption(tree: ast.AST, endpoint: Endpoint) -> list[Finding]:
+    """
+    Detecta cuando el endpoint consume APIs externas (httpx, requests, urllib)
+    y usa la respuesta directamente sin validar el status code, el tipo de contenido,
+    ni el esquema de datos recibido (confianza ciega en terceros).
+    """
+    findings = []
+
+    http_clients = {"httpx", "requests", "urllib", "aiohttp", "httplib"}
+    response_validators = (
+        "raise_for_status",
+        "status_code",
+        "response.ok",
+        ".ok",
+        "assert ",
+        "if resp",
+        "if response",
+        "json_schema",
+        "validate",
+        "pydantic",
+        "basemodel",
+    )
+
+    source_lower = (endpoint.source_code or "").lower()
+
+    # Verificar si hay llamadas a clientes HTTP externos
+    has_http_client = any(client in source_lower for client in http_clients)
+    if not has_http_client:
+        return []
+
+    # Verificar si hay validación de la respuesta
+    has_validation = any(v in source_lower for v in response_validators)
+
+    if not has_validation:
+        findings.append(
+            Finding(
+                rule_id="SAST-012",
+                title="Consumo inseguro de API externa sin validación de respuesta",
+                description=(
+                    "El endpoint realiza llamadas a APIs externas pero no valida "
+                    "el status code ni el esquema de la respuesta antes de procesarla. "
+                    "Datos maliciosos o inesperados de terceros pueden propagarse "
+                    "al sistema sin control."
+                ),
+                severity=Severity.MEDIUM,
+                lineno=1,
+                owasp="API10:2023 — Unsafe Consumption of APIs",
+                evidence="Cliente HTTP externo detectado sin raise_for_status() ni validación de esquema",
             )
         )
 

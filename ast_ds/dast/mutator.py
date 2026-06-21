@@ -190,6 +190,10 @@ def _run_rule(
         return _test_ssrf(client, url, endpoint, finding, auth_headers)
     if finding.rule_id == "SAST-010":
         return []  # Inventory: ya confirmado por SAST (ruta expuesta)
+    if finding.rule_id == "SAST-011":
+        return _test_sensitive_business_flow(client, url, endpoint, finding, auth_headers)
+    if finding.rule_id == "SAST-012":
+        return []  # Unsafe API consumption: confirmado por SAST (sin validación en código)
     return []
 
 
@@ -800,6 +804,69 @@ def _test_exception_disclosure(
                 )
             )
             break
+
+    return results
+
+
+# ── DAST-011: Sensitive Business Flow ────────────────────────────────────────
+
+def _test_sensitive_business_flow(
+    client: httpx.Client,
+    url: str,
+    endpoint: Endpoint,
+    finding: Finding,
+    auth_headers: dict[str, str],
+) -> list[DastResult]:
+    """
+    Verifica si el endpoint de flujo sensible permite múltiples requests
+    consecutivos sin ser bloqueado (ausencia de rate limiting).
+    Envía 5 requests seguidos y comprueba si todos responden sin 429.
+    """
+    results = []
+    body = _build_smart_body(endpoint)
+    blocked = False
+
+    for i in range(5):
+        try:
+            response = _send(client, endpoint.method, url, body, headers=auth_headers)
+
+            if response.status_code == 429:
+                blocked = True
+                results.append(
+                    DastResult(
+                        endpoint=endpoint,
+                        finding=finding,
+                        status=Status.NOT_FOUND,
+                        payload={"attempt": i + 1},
+                        status_code=response.status_code,
+                        response_snippet="Rate limiting activo — 429 detectado",
+                    )
+                )
+                break
+
+        except httpx.RequestError as e:
+            results.append(
+                DastResult(
+                    endpoint=endpoint,
+                    finding=finding,
+                    status=Status.NOT_FOUND,
+                    payload={"attempt": i + 1},
+                    error=str(e),
+                )
+            )
+            break
+
+    if not blocked:
+        results.append(
+            DastResult(
+                endpoint=endpoint,
+                finding=finding,
+                status=Status.CONFIRMED,
+                payload={"attempts": 5},
+                status_code=None,
+                response_snippet="5 requests consecutivos aceptados sin bloqueo (sin rate limiting)",
+            )
+        )
 
     return results
 
