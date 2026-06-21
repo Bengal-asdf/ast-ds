@@ -9,6 +9,14 @@ HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head"}
 
 
 @dataclass
+class ArgInfo:
+    name: str
+    annotation: Optional[str] = None   # nombre del tipo, ej: "CreateFarmInCmd"
+    is_pydantic: bool = False           # si es un modelo Pydantic
+    source_file: Optional[Path] = None  # archivo donde está definido el modelo
+
+
+@dataclass
 class Endpoint:
     method: str
     path: str
@@ -16,21 +24,36 @@ class Endpoint:
     source_file: Path
     lineno: int
     args: list[str] = field(default_factory=list)
+    arg_infos: list[ArgInfo] = field(default_factory=list)
     source_code: Optional[str] = None
+    enum_map: dict[str, str] = field(default_factory=dict)  # enums del proyecto
 
 
 def scan(config: Config) -> list[Endpoint]:
     files = _collect_files(config)
-
-    # Construir mapa de prefijos: archivo -> prefijo acumulado
     prefix_map = _build_prefix_map(files)
+
+    schema_files = _collect_schema_files(config)
+    all_files_for_pydantic = files + [f for f in schema_files if f not in files]
+
+    pydantic_map = _build_pydantic_map(all_files_for_pydantic)
+    enum_map = build_enum_map(all_files_for_pydantic)
 
     endpoints = []
     for file in files:
         prefix = prefix_map.get(file, "")
-        endpoints.extend(_scan_file(file, prefix))
+        endpoints.extend(_scan_file(file, prefix, pydantic_map, enum_map))
 
     return endpoints
+
+
+def _collect_schema_files(config: Config) -> list[Path]:
+    """Recopila archivos Python de la carpeta de schemas si está configurada."""
+    if config.schemas is None:
+        return []
+    if config.schemas.is_dir():
+        return sorted(config.schemas.rglob("*.py"))
+    return []
 
 
 def _collect_files(config: Config) -> list[Path]:
@@ -40,14 +63,138 @@ def _collect_files(config: Config) -> list[Path]:
         return [config.target]
 
 
-def _build_prefix_map(files: list[Path]) -> dict[Path, str]:
+def _build_pydantic_map(files: list[Path]) -> dict[str, Path]:
     """
-    Lee todos los router.py y construye un mapa
-    {archivo: prefijo_acumulado} para cada archivo Python.
+    Escanea todos los archivos y construye un mapa
+    {NombreModelo: archivo_donde_esta_definido} para clases que heredan
+    de BaseModel — incluyendo detección transitiva (CustomBaseModel, etc).
     """
-    prefix_map: dict[Path, str] = {}
+    PYDANTIC_ROOTS = {"BaseModel", "Schema", "SQLModel", "BaseSettings"}
 
-    # Buscar todos los router.py en las carpetas escaneadas
+    # Paso 1: detectar aliases de BaseModel via imports
+    for file in files:
+        try:
+            source = file.read_text(encoding="utf-8")
+            tree = ast.parse(source)
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if "pydantic" in module or "sqlmodel" in module:
+                    for alias in node.names:
+                        original = alias.name
+                        imported_as = alias.asname or alias.name
+                        if original in PYDANTIC_ROOTS:
+                            PYDANTIC_ROOTS.add(imported_as)
+
+    # Paso 2: recopilar todas las clases y sus bases
+    class_bases: dict[str, list[str]] = {}
+    class_file: dict[str, Path] = {}
+
+    for file in files:
+        try:
+            source = file.read_text(encoding="utf-8")
+            tree = ast.parse(source)
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            bases = []
+            for base in node.bases:
+                if isinstance(base, ast.Name):
+                    bases.append(base.id)
+                elif isinstance(base, ast.Attribute):
+                    bases.append(base.attr)
+            class_bases[node.name] = bases
+            class_file[node.name] = file
+
+    # Paso 3: detección transitiva
+    pydantic_classes: set[str] = set(PYDANTIC_ROOTS)
+    changed = True
+    while changed:
+        changed = False
+        for cls_name, bases in class_bases.items():
+            if cls_name not in pydantic_classes:
+                if any(b in pydantic_classes for b in bases):
+                    pydantic_classes.add(cls_name)
+                    changed = True
+
+    # Paso 4: mapa final
+    pydantic_map: dict[str, Path] = {}
+    for cls_name in pydantic_classes:
+        if cls_name in PYDANTIC_ROOTS:
+            continue
+        if cls_name in class_file:
+            pydantic_map[cls_name] = class_file[cls_name]
+
+    return pydantic_map
+
+
+def build_enum_map(files: list[Path]) -> dict[str, str]:
+    """
+    Escanea archivos buscando clases que hereden de TextChoices, IntegerChoices,
+    Enum, IntEnum, o str+Enum. Devuelve {NombreEnum: primer_valor} sin importar Django.
+    """
+    ENUM_BASES = {"TextChoices", "IntegerChoices", "Enum", "IntEnum", "StrEnum"}
+    enum_map: dict[str, str] = {}
+
+    for file in files:
+        try:
+            source = file.read_text(encoding="utf-8")
+            tree = ast.parse(source)
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+
+            # Verificar si hereda de alguna base de enum
+            is_enum = False
+            for base in node.bases:
+                base_name = ""
+                if isinstance(base, ast.Name):
+                    base_name = base.id
+                elif isinstance(base, ast.Attribute):
+                    base_name = base.attr
+                if base_name in ENUM_BASES:
+                    is_enum = True
+                    break
+
+            if not is_enum:
+                continue
+
+            # Extraer el primer valor del enum
+            for item in node.body:
+                # NAME = "value"  o  NAME = "value", "label"
+                if isinstance(item, ast.Assign):
+                    for target in item.targets:
+                        if not isinstance(target, ast.Name):
+                            continue
+                        if target.id.startswith("_"):
+                            continue
+                        # Valor directo: NAME = "value"
+                        if isinstance(item.value, ast.Constant):
+                            enum_map[node.name] = str(item.value.value)
+                            break
+                        # Tuple: NAME = "value", "Label"
+                        if isinstance(item.value, ast.Tuple):
+                            elts = item.value.elts
+                            if elts and isinstance(elts[0], ast.Constant):
+                                enum_map[node.name] = str(elts[0].value)
+                                break
+                    if node.name in enum_map:
+                        break
+
+    return enum_map
+
+
+def _build_prefix_map(files: list[Path]) -> dict[Path, str]:
+    prefix_map: dict[Path, str] = {}
     router_files = [f for f in files if f.name == "router.py"]
 
     for router_file in router_files:
@@ -62,10 +209,6 @@ def _extract_prefixes(
     all_files: list[Path],
     accumulated: str = "",
 ):
-    """
-    Analiza un router.py buscando include_router(x.router, prefix="/algo")
-    y mapea el prefijo acumulado a cada archivo destino.
-    """
     try:
         source = router_file.read_text(encoding="utf-8")
         tree = ast.parse(source)
@@ -76,14 +219,12 @@ def _extract_prefixes(
         if not isinstance(node, ast.Call):
             continue
 
-        # Buscar router.include_router(...)
         func = node.func
         if not isinstance(func, ast.Attribute):
             continue
         if func.attr != "include_router":
             continue
 
-        # Extraer prefix del keyword argument
         prefix = ""
         for kw in node.keywords:
             if kw.arg == "prefix" and isinstance(kw.value, ast.Constant):
@@ -92,8 +233,6 @@ def _extract_prefixes(
 
         full_prefix = accumulated + prefix
 
-        # Extraer el nombre del módulo del primer argumento
-        # include_router(farm.router, ...) → "farm"
         if not node.args:
             continue
 
@@ -102,26 +241,18 @@ def _extract_prefixes(
         if not module_name:
             continue
 
-        # Buscar el archivo correspondiente al módulo
         target_file = _find_file(module_name, router_file.parent, all_files)
         if target_file is None:
             continue
 
-        # Si es otro router.py, continuar recursivamente
         if target_file.name == "router.py":
             _extract_prefixes(target_file, prefix_map, all_files, full_prefix)
         else:
-            # Es un archivo de endpoints — mapear prefijo
             if target_file not in prefix_map:
                 prefix_map[target_file] = full_prefix
 
 
 def _extract_module_name(node: ast.expr) -> Optional[str]:
-    """
-    Extrae el nombre del módulo de un nodo AST.
-    farm.router → "farm"
-    Sampling.router → "Sampling"
-    """
     if isinstance(node, ast.Attribute):
         if isinstance(node.value, ast.Name):
             return node.value.id
@@ -135,10 +266,6 @@ def _find_file(
     base_dir: Path,
     all_files: list[Path],
 ) -> Optional[Path]:
-    """
-    Busca el archivo Python correspondiente al nombre del módulo.
-    """
-    # Buscar exacto: farm.py, Sampling.py, router.py
     candidates = [
         base_dir / f"{module_name}.py",
         base_dir / module_name / "router.py",
@@ -150,7 +277,6 @@ def _find_file(
         if candidate.exists():
             return candidate
 
-    # Buscar en todos los archivos por nombre
     for f in all_files:
         if f.stem == module_name:
             return f
@@ -158,7 +284,12 @@ def _find_file(
     return None
 
 
-def _scan_file(file: Path, prefix: str = "") -> list[Endpoint]:
+def _scan_file(
+    file: Path,
+    prefix: str = "",
+    pydantic_map: dict[str, Path] = {},
+    enum_map: dict[str, str] = {},
+) -> list[Endpoint]:
     try:
         source = file.read_text(encoding="utf-8")
         tree = ast.parse(source)
@@ -178,8 +309,7 @@ def _scan_file(file: Path, prefix: str = "") -> list[Endpoint]:
                 continue
 
             full_path = prefix + route_path
-
-            args = _extract_args(node)
+            args, arg_infos = _extract_args(node, pydantic_map)
             func_source = _extract_function_source(lines, node)
 
             endpoints.append(
@@ -190,7 +320,9 @@ def _scan_file(file: Path, prefix: str = "") -> list[Endpoint]:
                     source_file=file,
                     lineno=node.lineno,
                     args=args,
+                    arg_infos=arg_infos,
                     source_code=func_source,
+                    enum_map=enum_map,
                 )
             )
 
@@ -219,12 +351,56 @@ def _extract_route(decorator: ast.expr) -> tuple[Optional[str], str]:
     return method, "/"
 
 
-def _extract_args(func_node: ast.FunctionDef) -> list[str]:
+def _extract_args(
+    func_node: ast.FunctionDef,
+    pydantic_map: dict[str, Path],
+) -> tuple[list[str], list[ArgInfo]]:
+    """
+    Extrae nombres y tipos de los argumentos.
+    Devuelve (lista_nombres, lista_ArgInfo).
+    """
+    SKIP = {"self", "request", "response", "db", "session"}
+    FASTAPI_DEPS = {"Depends", "Security", "BackgroundTasks"}
+
     args = []
+    arg_infos = []
+
     for arg in func_node.args.args:
-        if arg.arg not in ("self", "request", "response", "db", "session"):
-            args.append(arg.arg)
-    return args
+        if arg.arg in SKIP:
+            continue
+
+        # Detectar si es un Depends() — saltar
+        if arg.annotation is not None:
+            ann_str = ast.unparse(arg.annotation)
+            if any(dep in ann_str for dep in FASTAPI_DEPS):
+                continue
+
+        annotation_name = None
+        is_pydantic = False
+        model_file = None
+
+        if arg.annotation is not None:
+            ann_str = ast.unparse(arg.annotation)
+            # Nombre simple del tipo (sin Optional[], List[], etc.)
+            base_type = ann_str.split("[")[0].strip()
+            annotation_name = base_type
+
+            # Verificar si es un modelo Pydantic conocido
+            if base_type in pydantic_map:
+                is_pydantic = True
+                model_file = pydantic_map[base_type]
+
+        args.append(arg.arg)
+        arg_infos.append(
+            ArgInfo(
+                name=arg.arg,
+                annotation=annotation_name,
+                is_pydantic=is_pydantic,
+                source_file=model_file,
+            )
+        )
+
+    return args, arg_infos
 
 
 def _extract_function_source(lines: list[str], node: ast.FunctionDef) -> str:

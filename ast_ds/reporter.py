@@ -1,15 +1,11 @@
 from rich.console import Console
 from rich.live import Live
-from rich.progress import (
-    BarColumn,
-    Progress,
-    SpinnerColumn,
-    TextColumn,
-    TimeElapsedColumn,
-)
+from rich.progress import (BarColumn, Progress, SpinnerColumn, TextColumn,
+                           TimeElapsedColumn)
 from rich.rule import Rule
 from rich.text import Text
 
+from .config import AuthConfig
 from .dast.mutator import DastResult, Status
 from .sast.analyzer import Finding, Severity
 from .scanner import Endpoint
@@ -41,7 +37,7 @@ _route_width = 50
 def print_header():
     console.print()
     console.print(
-        Text("ast-ds v0.1.0", style="bold white")
+        Text("ast-ds v0.2.0", style="bold white")
         + Text(" — Application Security Testing", style="dim")
     )
     console.print()
@@ -181,6 +177,25 @@ def print_summary(
 def print_error(message: str):
     console.print()
     console.print(Text("Error: ", style="bold red") + Text(message, style="white"))
+    console.print()
+
+
+def print_auth_info(auth: AuthConfig):
+    auth_type = auth.type.upper()
+    if auth.token:
+        source = "token estático"
+    elif auth.login_url:
+        source = f"login dinámico → {auth.login_url}"
+    elif auth.api_key:
+        source = "API key"
+    else:
+        source = "sin credenciales configuradas"
+
+    console.print(
+        Text("Autenticación: ", style="dim")
+        + Text(auth_type, style="bold cyan")
+        + Text(f" ({source})", style="dim")
+    )
     console.print()
 
 

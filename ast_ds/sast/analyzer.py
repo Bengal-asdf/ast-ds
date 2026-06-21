@@ -1,4 +1,5 @@
 import ast
+import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
@@ -39,6 +40,11 @@ def analyze(endpoint: Endpoint) -> list[Finding]:
     findings.extend(_check_missing_input_validation(tree, endpoint))
     findings.extend(_check_hardcoded_secrets(tree))
     findings.extend(_check_broad_exception(tree))
+    findings.extend(_check_bola(tree, endpoint))
+    findings.extend(_check_resource_consumption(tree, endpoint))
+    findings.extend(_check_function_level_auth(tree, endpoint))
+    findings.extend(_check_ssrf(tree))
+    findings.extend(_check_inventory(tree, endpoint))
 
     return findings
 
@@ -49,7 +55,6 @@ def _check_sql_injection(tree: ast.AST, source: str) -> list[Finding]:
     sql_keywords = ("select", "insert", "update", "delete", "from", "where")
 
     for node in ast.walk(tree):
-        # Buscar concatenación de strings: "SELECT " + variable
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
             node_source = ast.unparse(node).lower()
             if any(kw in node_source for kw in sql_keywords):
@@ -65,7 +70,6 @@ def _check_sql_injection(tree: ast.AST, source: str) -> list[Finding]:
                     )
                 )
 
-        # Buscar f-strings con SQL: f"SELECT * FROM {tabla}"
         if isinstance(node, ast.JoinedStr):
             node_source = ast.unparse(node).lower()
             if any(kw in node_source for kw in sql_keywords):
@@ -102,7 +106,6 @@ def _check_missing_auth(tree: ast.AST, endpoint: Endpoint) -> list[Finding]:
     source_lower = (endpoint.source_code or "").lower()
     has_auth = any(kw.lower() in source_lower for kw in auth_keywords)
 
-    # Solo alertar en endpoints que modifican datos
     if not has_auth and endpoint.method in ("POST", "PUT", "PATCH", "DELETE"):
         return [
             Finding(
@@ -129,7 +132,6 @@ def _check_missing_input_validation(tree: ast.AST, endpoint: Endpoint) -> list[F
 
     has_pydantic = any(t in source for t in pydantic_types)
 
-    # Buscar parámetros sin tipo definido
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef):
             continue
@@ -222,5 +224,298 @@ def _check_broad_exception(tree: ast.AST) -> list[Finding]:
                     evidence="except: (sin tipo específico)",
                 )
             )
+
+    return findings
+
+
+# ── REGLA 6: BOLA — Broken Object Level Authorization (API1:2023) ─────────────
+def _check_bola(tree: ast.AST, endpoint: Endpoint) -> list[Finding]:
+    """
+    Detecta patrones de BOLA: el endpoint recibe un ID de objeto como parámetro
+    de ruta o cuerpo pero no realiza una verificación explícita de propiedad
+    (no compara user_id / owner_id con el usuario autenticado).
+    """
+    findings = []
+
+    # Buscar parámetros que parezcan IDs de objeto en la ruta
+    id_pattern = re.compile(r"\{(\w*id\w*|\w*_id|\w*Id)\}", re.IGNORECASE)
+    path_ids = id_pattern.findall(endpoint.path)
+    if not path_ids:
+        return []
+
+    source = endpoint.source_code or ""
+    source_lower = source.lower()
+
+    # Indicadores de que se hace verificación de propiedad
+    ownership_checks = (
+        "user_id",
+        "owner_id",
+        "current_user.id",
+        "current_user['id']",
+        "== user",
+        "!= user",
+        "forbidden",
+        "raise httpexception",
+        "status.http_403",
+        "403",
+    )
+    has_ownership_check = any(kw in source_lower for kw in ownership_checks)
+
+    # Indicadores de que hay autenticación (sin auth no aplica BOLA)
+    auth_present = any(
+        kw in source_lower
+        for kw in ("current_user", "get_current_user", "depends", "token")
+    )
+
+    if auth_present and not has_ownership_check:
+        findings.append(
+            Finding(
+                rule_id="SAST-006",
+                title="Posible BOLA — Acceso a objeto sin verificación de propiedad",
+                description=(
+                    f"El endpoint recibe el identificador '{path_ids[0]}' en la ruta "
+                    "pero no verifica que el objeto pertenezca al usuario autenticado."
+                ),
+                severity=Severity.CRITICAL,
+                lineno=1,
+                owasp="API1:2023 — Broken Object Level Authorization",
+                evidence=f"Path param: {path_ids[0]} | Sin comparación owner/user",
+            )
+        )
+
+    return findings
+
+
+# ── REGLA 7: Unrestricted Resource Consumption (API4:2023) ───────────────────
+def _check_resource_consumption(tree: ast.AST, endpoint: Endpoint) -> list[Finding]:
+    """
+    Detecta ausencia de límites en parámetros de paginación o tamaño de recursos
+    (limit, page_size, count, offset) sin validación de rango máximo.
+    """
+    findings = []
+    pagination_params = {"limit", "page_size", "count", "size", "per_page", "top"}
+    source = endpoint.source_code or ""
+    source_lower = source.lower()
+
+    # Solo si el endpoint tiene parámetros de paginación
+    has_pagination = any(p in source_lower for p in pagination_params)
+    if not has_pagination:
+        return []
+
+    # Buscar si hay validación de rango (Field con le/ge, validators, conint)
+    range_validators = (
+        "field(",
+        "le=",
+        "ge=",
+        "gt=",
+        "lt=",
+        "max_",
+        "conint",
+        "validator",
+        "assert",
+        "if limit",
+        "if size",
+        "if count",
+        "if page_size",
+    )
+    has_range_check = any(v in source_lower for v in range_validators)
+
+    if not has_range_check:
+        findings.append(
+            Finding(
+                rule_id="SAST-007",
+                title="Consumo de recursos sin límite máximo",
+                description=(
+                    "El endpoint acepta parámetros de paginación o tamaño "
+                    "(limit/size/count) sin validar un valor máximo permitido. "
+                    "Un atacante puede solicitar volúmenes arbitrarios de datos."
+                ),
+                severity=Severity.MEDIUM,
+                lineno=1,
+                owasp="API4:2023 — Unrestricted Resource Consumption",
+                evidence="Parámetro de paginación sin Field(le=...) ni validación de rango",
+            )
+        )
+
+    return findings
+
+
+# ── REGLA 8: Broken Function Level Authorization (API5:2023) ─────────────────
+def _check_function_level_auth(tree: ast.AST, endpoint: Endpoint) -> list[Finding]:
+    """
+    Detecta endpoints administrativos o privilegiados que no verifican
+    el rol o nivel de privilegio del usuario autenticado.
+    """
+    findings = []
+
+    admin_patterns = re.compile(
+        r"/(admin|management|internal|superuser|staff|backoffice|ops|system)",
+        re.IGNORECASE,
+    )
+    if not admin_patterns.search(endpoint.path):
+        return []
+
+    source_lower = (endpoint.source_code or "").lower()
+
+    role_checks = (
+        "is_admin",
+        "is_superuser",
+        "role",
+        "permission",
+        "has_permission",
+        "require_role",
+        "check_role",
+        "admin",
+        "superuser",
+        "staff",
+        "scope",
+    )
+    has_role_check = any(kw in source_lower for kw in role_checks)
+
+    if not has_role_check:
+        findings.append(
+            Finding(
+                rule_id="SAST-008",
+                title="Endpoint privilegiado sin verificación de rol",
+                description=(
+                    f"La ruta '{endpoint.path}' sugiere funcionalidad administrativa "
+                    "pero no contiene verificación de rol o nivel de privilegio."
+                ),
+                severity=Severity.HIGH,
+                lineno=1,
+                owasp="API5:2023 — Broken Function Level Authorization",
+                evidence=f"Ruta: {endpoint.path} | Sin comprobación de rol/permiso",
+            )
+        )
+
+    return findings
+
+
+# ── REGLA 9: SSRF — Server Side Request Forgery (API7:2023) ─────────────────
+def _check_ssrf(tree: ast.AST) -> list[Finding]:
+    """
+    Detecta llamadas HTTP salientes donde la URL se construye total o parcialmente
+    con datos controlados por el usuario (parámetros de función).
+    """
+    findings = []
+
+    # Nombres de funciones/métodos que realizan requests HTTP salientes
+    http_callers = {
+        "get", "post", "put", "patch", "delete", "request", "fetch",
+        "urlopen", "urlretrieve", "open",
+    }
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+
+        # Detectar httpx.get(url), requests.get(url), urllib.request.urlopen(url)
+        func = node.func
+        caller_name = None
+        if isinstance(func, ast.Attribute) and func.attr.lower() in http_callers:
+            caller_name = func.attr
+        elif isinstance(func, ast.Name) and func.id.lower() in http_callers:
+            caller_name = func.id
+
+        if caller_name is None:
+            continue
+
+        # Verificar si el primer argumento de la URL contiene una variable
+        if not node.args:
+            continue
+
+        first_arg = node.args[0]
+
+        # URL construida con f-string o concatenación: riesgo de SSRF
+        is_dynamic_url = isinstance(first_arg, ast.JoinedStr) or (
+            isinstance(first_arg, ast.BinOp) and isinstance(first_arg.op, ast.Add)
+        )
+
+        # URL que es directamente un parámetro de función
+        is_param_url = isinstance(first_arg, ast.Name)
+
+        if is_dynamic_url or is_param_url:
+            evidence = ast.unparse(first_arg)[:100]
+            findings.append(
+                Finding(
+                    rule_id="SAST-009",
+                    title="Posible SSRF — URL controlada por el usuario",
+                    description=(
+                        f"Se detectó una llamada HTTP saliente ({caller_name}) cuya URL "
+                        "se construye con datos potencialmente controlados por el usuario. "
+                        "Sin validación de destino, un atacante puede redirigir requests "
+                        "a servicios internos."
+                    ),
+                    severity=Severity.HIGH,
+                    lineno=node.lineno if hasattr(node, "lineno") else 0,
+                    owasp="API7:2023 — Server Side Request Forgery",
+                    evidence=f"{caller_name}({evidence})",
+                )
+            )
+
+    return findings
+
+
+# ── REGLA 10: Improper Inventory Management (API9:2023) ──────────────────────
+def _check_inventory(tree: ast.AST, endpoint: Endpoint) -> list[Finding]:
+    """
+    Detecta indicadores de endpoints no documentados, en versiones antiguas,
+    de debug/test, o con rutas que sugieren exposición accidental.
+    """
+    findings = []
+
+    inventory_patterns = re.compile(
+        r"/(v[0-9]+|beta|alpha|test|debug|dev|deprecated|legacy|old|tmp|internal|private)",
+        re.IGNORECASE,
+    )
+
+    match = inventory_patterns.search(endpoint.path)
+    if not match:
+        return []
+
+    segment = match.group(1).lower()
+
+    if segment.startswith("v") and segment[1:].isdigit():
+        # Versión numérica: verificar si hay versión más nueva implícita
+        # Solo reportar si es v0 o si el código tiene comentarios de deprecación
+        version_num = int(segment[1:])
+        source_lower = (endpoint.source_code or "").lower()
+        is_deprecated = any(
+            kw in source_lower
+            for kw in ("deprecated", "legacy", "old", "will be removed", "obsolete")
+        )
+        if version_num == 0 or is_deprecated:
+            findings.append(
+                Finding(
+                    rule_id="SAST-010",
+                    title="Endpoint en versión obsoleta o deprecada",
+                    description=(
+                        f"La ruta '{endpoint.path}' expone una versión de API potencialmente "
+                        "obsoleta. Los endpoints deprecados pueden carecer de controles "
+                        "de seguridad actualizados."
+                    ),
+                    severity=Severity.LOW,
+                    lineno=1,
+                    owasp="API9:2023 — Improper Inventory Management",
+                    evidence=f"Ruta: {endpoint.path}",
+                )
+            )
+    else:
+        # Segmentos de debug/test/internal
+        findings.append(
+            Finding(
+                rule_id="SAST-010",
+                title="Endpoint de diagnóstico o acceso interno expuesto",
+                description=(
+                    f"La ruta '{endpoint.path}' contiene el segmento '/{segment}' que "
+                    "sugiere un endpoint de debug, testing o acceso interno expuesto "
+                    "en el entorno analizado."
+                ),
+                severity=Severity.MEDIUM,
+                lineno=1,
+                owasp="API9:2023 — Improper Inventory Management",
+                evidence=f"Segmento detectado: /{segment}",
+            )
+        )
 
     return findings
