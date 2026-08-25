@@ -12,8 +12,9 @@ from ..scanner import Endpoint
 
 class Status(str, Enum):
     CONFIRMED = "CONFIRMADO"
+    NOT_CONFIRMED = "NO CONFIRMADO"
+    INCONCLUSIVE = "INCONCLUSIVO"
     POTENTIAL = "POTENCIAL"
-    NOT_FOUND = "NO_DETECTADO"
 
 
 @dataclass
@@ -64,18 +65,18 @@ RESOURCE_PAYLOADS = [
 ]
 
 SSRF_PAYLOADS = [
-    "http://169.254.169.254/latest/meta-data/",       # AWS metadata
-    "http://metadata.google.internal/computeMetadata/v1/",  # GCP metadata
-    "http://127.0.0.1:22",                             # localhost SSH
-    "http://127.0.0.1:6379",                           # Redis
-    "http://192.168.1.1",                              # red interna
-    "file:///etc/passwd",                              # file:// scheme
+    "http://169.254.169.254/latest/meta-data/",
+    "http://metadata.google.internal/computeMetadata/v1/",
+    "http://127.0.0.1:22",
+    "http://127.0.0.1:6379",
+    "http://192.168.1.1",
+    "file:///etc/passwd",
     "http://0.0.0.0:80",
 ]
 
 BOLA_ID_PAYLOADS = [
     "1", "2", "0", "-1", "99999999",
-    "00000000-0000-0000-0000-000000000001",            # UUID de otro usuario
+    "00000000-0000-0000-0000-000000000001",
 ]
 
 
@@ -85,25 +86,18 @@ def _resolve_auth_headers(
     auth: Optional[AuthConfig],
     client: httpx.Client,
 ) -> dict[str, str]:
-    """
-    Devuelve las cabeceras de autenticación listas para usar en requests DAST.
-    Soporta: token estático (jwt/bearer), OAuth2 password flow, API key.
-    """
     if auth is None:
         return {}
 
     auth_type = auth.type.lower()
 
-    # Token estático proporcionado directamente en config.yaml
     if auth.token:
         prefix = auth.prefix or "Bearer"
         return {auth.header: f"{prefix} {auth.token}"}
 
-    # API Key
     if auth_type == "apikey" and auth.api_key:
         return {auth.header: auth.api_key}
 
-    # OAuth2 / JWT dinámico: obtener token vía login_url
     if auth.login_url and auth.username and auth.password:
         try:
             resp = client.post(
@@ -116,7 +110,6 @@ def _resolve_auth_headers(
             )
             if resp.status_code in (200, 201):
                 body = resp.json()
-                # Buscar el token en campos comunes
                 token = (
                     body.get("access_token")
                     or body.get("token")
@@ -134,6 +127,24 @@ def _resolve_auth_headers(
 
 # ── Punto de entrada ──────────────────────────────────────────────────────────
 
+def _resolve_path_params(path: str) -> str:
+    """
+    Sustituye los path params con valores de prueba válidos.
+    ej: /orders/{order_id}/vulnerable → /orders/1/vulnerable
+    """
+    import re
+    def replace_param(match):
+        param_name = match.group(1).lower()
+        if "id" in param_name:
+            return "1"
+        if "uuid" in param_name:
+            return "00000000-0000-0000-0000-000000000001"
+        if "name" in param_name:
+            return "test"
+        return "1"
+    return re.sub(r"\{(\w+)\}", replace_param, path)
+
+
 def mutate(
     endpoint: Endpoint,
     findings: list[Finding],
@@ -142,10 +153,9 @@ def mutate(
     auth: Optional[AuthConfig] = None,
 ) -> list[DastResult]:
     results = []
-    url = f"{base_url}{endpoint.path}"
+    url = f"{base_url}{_resolve_path_params(endpoint.path)}"
 
     with httpx.Client(timeout=timeout, verify=False) as client:
-        # Resolver cabeceras de auth una sola vez por sesión
         auth_headers = _resolve_auth_headers(auth, client)
 
         for finding in findings:
@@ -189,11 +199,11 @@ def _run_rule(
     if finding.rule_id == "SAST-009":
         return _test_ssrf(client, url, endpoint, finding, auth_headers)
     if finding.rule_id == "SAST-010":
-        return []  # Inventory: ya confirmado por SAST (ruta expuesta)
+        return []  # Inventory: validacion estatica unicamente
     if finding.rule_id == "SAST-011":
         return _test_sensitive_business_flow(client, url, endpoint, finding, auth_headers)
     if finding.rule_id == "SAST-012":
-        return []  # Unsafe API consumption: confirmado por SAST (sin validación en código)
+        return []  # Unsafe API consumption: validacion estatica unicamente
     return []
 
 
@@ -209,14 +219,8 @@ def _test_sql_injection(
     results = []
 
     for payload_value in SQL_PAYLOADS:
-        body = (
-            {arg: payload_value for arg in endpoint.args}
-            if endpoint.args
-            else {"q": payload_value}
-        )
-        # Sobreescribir con payload SQL sobre body inteligente
         smart = _build_smart_body(endpoint)
-        body = {k: payload_value for k in smart} if smart else body
+        body = {k: payload_value for k in smart} if smart else {"q": payload_value}
 
         try:
             response = _send(client, endpoint.method, url, body, headers=auth_headers)
@@ -238,7 +242,7 @@ def _test_sql_injection(
                 DastResult(
                     endpoint=endpoint,
                     finding=finding,
-                    status=Status.NOT_FOUND,
+                    status=Status.INCONCLUSIVE,
                     payload=body,
                     error=str(e),
                 )
@@ -258,13 +262,13 @@ def _evaluate_sql_response(response: httpx.Response) -> Status:
     if response.status_code == 500:
         if any(ind in body_lower for ind in error_indicators):
             return Status.CONFIRMED
-        return Status.POTENTIAL
+        return Status.INCONCLUSIVE
 
     if response.status_code == 200:
         if any(ind in body_lower for ind in error_indicators):
             return Status.CONFIRMED
 
-    return Status.NOT_FOUND
+    return Status.NOT_CONFIRMED
 
 
 # ── DAST-002: Autenticación ausente ──────────────────────────────────────────
@@ -300,7 +304,7 @@ def _test_missing_auth(
                 DastResult(
                     endpoint=endpoint,
                     finding=finding,
-                    status=Status.NOT_FOUND,
+                    status=Status.INCONCLUSIVE,
                     payload={"headers": headers},
                     error=str(e),
                 )
@@ -314,14 +318,14 @@ def _evaluate_auth_response(response: httpx.Response) -> Status:
     if response.status_code in (200, 201):
         return Status.CONFIRMED
     if response.status_code in (401, 403):
-        return Status.NOT_FOUND
+        return Status.NOT_CONFIRMED
     if response.status_code == 422:
-        # 422 = FastAPI validó el body sin pedir token → auth ausente confirmada
-        return Status.CONFIRMED
+        # 422 indica validacion de datos, no ausencia de autenticacion confirmada
+        return Status.INCONCLUSIVE
     if response.status_code == 500:
-        # 500 = el endpoint ejecutó lógica de negocio sin pedir token → auth ausente confirmada
-        return Status.CONFIRMED
-    return Status.NOT_FOUND
+        # 500 no demuestra ejecucion no autorizada por si solo
+        return Status.INCONCLUSIVE
+    return Status.INCONCLUSIVE
 
 
 # ── DAST-003: Validación de entrada ──────────────────────────────────────────
@@ -357,7 +361,7 @@ def _test_input_validation(
                 DastResult(
                     endpoint=endpoint,
                     finding=finding,
-                    status=Status.NOT_FOUND,
+                    status=Status.INCONCLUSIVE,
                     payload=body,
                     error=str(e),
                 )
@@ -369,12 +373,13 @@ def _test_input_validation(
 
 def _evaluate_validation_response(response: httpx.Response) -> Status:
     if response.status_code == 500:
-        return Status.CONFIRMED
+        # 500 solo no demuestra modificacion o acceso indebido
+        return Status.INCONCLUSIVE
     if response.status_code == 200:
         return Status.POTENTIAL
     if response.status_code == 422:
-        return Status.NOT_FOUND
-    return Status.NOT_FOUND
+        return Status.NOT_CONFIRMED
+    return Status.INCONCLUSIVE
 
 
 # ── DAST-006: BOLA ───────────────────────────────────────────────────────────
@@ -386,10 +391,6 @@ def _test_bola(
     finding: Finding,
     auth_headers: dict[str, str],
 ) -> list[DastResult]:
-    """
-    Intenta acceder a recursos con IDs distintos al del usuario autenticado.
-    Un 200 con contenido distinto al propio indica BOLA confirmado.
-    """
     results = []
     import re
 
@@ -399,7 +400,6 @@ def _test_bola(
         return []
 
     for test_id in BOLA_ID_PAYLOADS[:3]:
-        # Sustituir todos los parámetros de ruta con el ID de prueba
         test_url = url
         for param in path_params:
             test_url = re.sub(r"\{" + param + r"\}", str(test_id), test_url)
@@ -409,13 +409,12 @@ def _test_bola(
                 client, endpoint.method, test_url,
                 body={}, headers=auth_headers
             )
-            # 200 accediendo a un ID ajeno = BOLA confirmado
             if response.status_code == 200:
                 status = Status.CONFIRMED
             elif response.status_code in (403, 404):
-                status = Status.NOT_FOUND
+                status = Status.NOT_CONFIRMED
             else:
-                status = Status.POTENTIAL
+                status = Status.INCONCLUSIVE
 
             results.append(
                 DastResult(
@@ -434,7 +433,7 @@ def _test_bola(
                 DastResult(
                     endpoint=endpoint,
                     finding=finding,
-                    status=Status.NOT_FOUND,
+                    status=Status.INCONCLUSIVE,
                     payload={"path_id": test_id},
                     error=str(e),
                 )
@@ -453,29 +452,37 @@ def _test_resource_consumption(
     finding: Finding,
     auth_headers: dict[str, str],
 ) -> list[DastResult]:
-    """
-    Envía valores extremos en parámetros de paginación.
-    Un 200 con respuesta masiva o un 500 indican consumo sin límite.
-    """
     results = []
 
     for payload in RESOURCE_PAYLOADS:
-        body = {**payload, **{arg: "test" for arg in endpoint.args if arg not in payload}}
+        # Construir body inteligente y sustituir campos de paginación
+        smart = _build_smart_body(endpoint)
+        if smart:
+            # Sustituir campos de paginación en el body inteligente
+            body = {**smart}
+            for k in list(body.keys()):
+                if k.lower() in {p.lower() for p in RESOURCE_PAYLOADS[0].keys()}:
+                    body[k] = list(payload.values())[0]
+            # Si no hay campo de paginación en el modelo, añadir directamente
+            if not any(k.lower() in {"limit", "page_size", "count", "size", "per_page"} for k in smart):
+                body = {**payload}
+        else:
+            body = {**payload, **{arg: "test" for arg in endpoint.args if arg not in payload}}
 
         try:
             response = _send(client, endpoint.method, url, body, headers=auth_headers)
 
             if response.status_code == 200:
-                # Respuesta muy grande puede indicar que no hay límite
                 content_length = len(response.content)
                 if content_length > 50_000:
                     status = Status.CONFIRMED
                 else:
                     status = Status.POTENTIAL
             elif response.status_code == 500:
-                status = Status.CONFIRMED
+                # 500 no demuestra consumo no restringido por si solo
+                status = Status.INCONCLUSIVE
             elif response.status_code == 422:
-                status = Status.NOT_FOUND  # Pydantic rechazó el valor
+                status = Status.NOT_CONFIRMED
             else:
                 status = Status.POTENTIAL
 
@@ -496,7 +503,7 @@ def _test_resource_consumption(
                 DastResult(
                     endpoint=endpoint,
                     finding=finding,
-                    status=Status.NOT_FOUND,
+                    status=Status.INCONCLUSIVE,
                     payload=payload,
                     error=str(e),
                 )
@@ -514,15 +521,11 @@ def _test_function_level_auth(
     endpoint: Endpoint,
     finding: Finding,
 ) -> list[DastResult]:
-    """
-    Intenta acceder al endpoint administrativo sin credenciales o con token no privilegiado.
-    Un 200/201 sin auth indica que el control de acceso falla.
-    """
     results = []
     low_priv_headers = [
         {},
         {"Authorization": "Bearer invalid_token"},
-        {"Authorization": "Bearer eyJhbGciOiJub25lIn0.e30."},  # JWT alg:none
+        {"Authorization": "Bearer eyJhbGciOiJub25lIn0.e30."},
     ]
 
     for headers in low_priv_headers:
@@ -534,9 +537,9 @@ def _test_function_level_auth(
             if response.status_code in (200, 201):
                 status = Status.CONFIRMED
             elif response.status_code in (401, 403):
-                status = Status.NOT_FOUND
+                status = Status.NOT_CONFIRMED
             else:
-                status = Status.POTENTIAL
+                status = Status.INCONCLUSIVE
 
             results.append(
                 DastResult(
@@ -555,7 +558,7 @@ def _test_function_level_auth(
                 DastResult(
                     endpoint=endpoint,
                     finding=finding,
-                    status=Status.NOT_FOUND,
+                    status=Status.INCONCLUSIVE,
                     payload={"headers": headers},
                     error=str(e),
                 )
@@ -574,18 +577,25 @@ def _test_ssrf(
     finding: Finding,
     auth_headers: dict[str, str],
 ) -> list[DastResult]:
-    """
-    Inyecta URLs de destinos internos/metadata cloud en parámetros de URL.
-    Un 200 con contenido de metadata indica SSRF confirmado.
-    """
     results = []
 
     for ssrf_url in SSRF_PAYLOADS:
-        body = (
-            {arg: ssrf_url for arg in endpoint.args}
-            if endpoint.args
-            else {"url": ssrf_url, "target": ssrf_url, "endpoint": ssrf_url}
-        )
+        # Construir body inteligente y sustituir campos de URL con el payload SSRF
+        smart = _build_smart_body(endpoint)
+        if smart:
+            # Sustituir campos que parecen URLs o destinos
+            url_field_names = {"url", "target", "endpoint", "uri", "href", "link", "destination", "host"}
+            body = {}
+            for k, v in smart.items():
+                if k.lower() in url_field_names or "url" in k.lower():
+                    body[k] = ssrf_url
+                else:
+                    body[k] = v
+            # Si no hay campo de URL, usar fallback
+            if not any(k.lower() in url_field_names or "url" in k.lower() for k in smart):
+                body = {"url": ssrf_url, "target": ssrf_url}
+        else:
+            body = {"url": ssrf_url, "target": ssrf_url, "endpoint": ssrf_url}
 
         try:
             response = _send(client, endpoint.method, url, body, headers=auth_headers)
@@ -608,7 +618,7 @@ def _test_ssrf(
                 DastResult(
                     endpoint=endpoint,
                     finding=finding,
-                    status=Status.NOT_FOUND,
+                    status=Status.INCONCLUSIVE,
                     payload={"ssrf_url": ssrf_url},
                     error=str(e),
                 )
@@ -620,24 +630,21 @@ def _test_ssrf(
 def _evaluate_ssrf_response(response: httpx.Response, ssrf_url: str) -> Status:
     body_lower = response.text.lower()
 
-    # Indicadores de respuesta de metadata cloud
     cloud_metadata_indicators = (
         "ami-id", "instance-id", "computemetadata",
-        "root:x:0", "daemon:", "/bin/bash",  # /etc/passwd
+        "root:x:0", "daemon:", "/bin/bash",
     )
 
     if response.status_code == 200:
         if any(ind in body_lower for ind in cloud_metadata_indicators):
             return Status.CONFIRMED
-        # Respuesta exitosa a una URL interna es sospechosa
         if "169.254" in ssrf_url or "127.0.0.1" in ssrf_url or "metadata" in ssrf_url:
             return Status.POTENTIAL
 
     if response.status_code == 500:
-        # Timeout o error de conexión interna puede indicar que se intentó la conexión
-        return Status.POTENTIAL
+        return Status.INCONCLUSIVE
 
-    return Status.NOT_FOUND
+    return Status.NOT_CONFIRMED
 
 
 # ── DAST-004: Secret Disclosure ──────────────────────────────────────────────
@@ -649,11 +656,6 @@ def _test_secret_disclosure(
     finding: Finding,
     auth_headers: dict[str, str],
 ) -> list[DastResult]:
-    """
-    Hace un request normal al endpoint y comprueba si el valor del secret
-    hardcodeado aparece en la respuesta (information disclosure).
-    También verifica si la respuesta expone campos sensibles en el body.
-    """
     sensitive_keys = (
         "secret", "password", "passwd", "token", "api_key",
         "apikey", "private_key", "credentials", "auth",
@@ -665,17 +667,14 @@ def _test_secret_disclosure(
         response = _send(client, endpoint.method, url, body, headers=auth_headers)
         body_lower = response.text.lower()
 
-        # Verificar si la respuesta contiene campos sensibles con valores reales
         exposed_fields = [k for k in sensitive_keys if f'"{k}"' in body_lower]
 
         if response.status_code == 200 and exposed_fields:
             status = Status.CONFIRMED
             evidence = f"Campos sensibles en respuesta: {', '.join(exposed_fields)}"
         elif response.status_code == 200:
-            # El endpoint responde pero no expone el secret directamente
-            # El finding SAST ya es suficiente evidencia
             status = Status.POTENTIAL
-            evidence = "Endpoint accesible; secret detectado en código fuente"
+            evidence = "Endpoint accesible; secret detectado en codigo fuente"
         else:
             status = Status.POTENTIAL
             evidence = f"HTTP {response.status_code}"
@@ -696,7 +695,7 @@ def _test_secret_disclosure(
             DastResult(
                 endpoint=endpoint,
                 finding=finding,
-                status=Status.POTENTIAL,
+                status=Status.INCONCLUSIVE,
                 payload=body,
                 error=str(e),
             )
@@ -745,10 +744,6 @@ def _test_exception_disclosure(
     finding: Finding,
     auth_headers: dict[str, str],
 ) -> list[DastResult]:
-    """
-    Envía inputs que provocan excepciones y verifica si la respuesta
-    filtra stack traces o mensajes de error internos del servidor.
-    """
     results = []
 
     for payload_value in EXCEPTION_PAYLOADS[:5]:
@@ -765,18 +760,18 @@ def _test_exception_disclosure(
                     status = Status.CONFIRMED
                     snippet = f"Stack trace expuesto: '{matched[0]}' detectado en respuesta"
                 else:
-                    status = Status.POTENTIAL
+                    status = Status.INCONCLUSIVE
                     snippet = "HTTP 500 sin stack trace visible"
             elif response.status_code == 200:
                 matched = [ind for ind in STACKTRACE_INDICATORS if ind in body_lower]
                 if matched:
                     status = Status.CONFIRMED
-                    snippet = f"Información interna en respuesta 200: '{matched[0]}'"
+                    snippet = f"Informacion interna en respuesta 200: '{matched[0]}'"
                 else:
-                    status = Status.NOT_FOUND
-                    snippet = "HTTP 200 sin información sensible"
+                    status = Status.NOT_CONFIRMED
+                    snippet = "HTTP 200 sin informacion sensible"
             else:
-                status = Status.NOT_FOUND
+                status = Status.NOT_CONFIRMED
                 snippet = f"HTTP {response.status_code}"
 
             results.append(
@@ -798,7 +793,7 @@ def _test_exception_disclosure(
                 DastResult(
                     endpoint=endpoint,
                     finding=finding,
-                    status=Status.NOT_FOUND,
+                    status=Status.INCONCLUSIVE,
                     payload=body,
                     error=str(e),
                 )
@@ -817,11 +812,6 @@ def _test_sensitive_business_flow(
     finding: Finding,
     auth_headers: dict[str, str],
 ) -> list[DastResult]:
-    """
-    Verifica si el endpoint de flujo sensible permite múltiples requests
-    consecutivos sin ser bloqueado (ausencia de rate limiting).
-    Envía 5 requests seguidos y comprueba si todos responden sin 429.
-    """
     results = []
     body = _build_smart_body(endpoint)
     blocked = False
@@ -836,7 +826,7 @@ def _test_sensitive_business_flow(
                     DastResult(
                         endpoint=endpoint,
                         finding=finding,
-                        status=Status.NOT_FOUND,
+                        status=Status.NOT_CONFIRMED,
                         payload={"attempt": i + 1},
                         status_code=response.status_code,
                         response_snippet="Rate limiting activo — 429 detectado",
@@ -849,7 +839,7 @@ def _test_sensitive_business_flow(
                 DastResult(
                     endpoint=endpoint,
                     finding=finding,
-                    status=Status.NOT_FOUND,
+                    status=Status.INCONCLUSIVE,
                     payload={"attempt": i + 1},
                     error=str(e),
                 )
@@ -864,7 +854,7 @@ def _test_sensitive_business_flow(
                 status=Status.CONFIRMED,
                 payload={"attempts": 5},
                 status_code=None,
-                response_snippet="5 requests consecutivos aceptados sin bloqueo (sin rate limiting)",
+                response_snippet="5 solicitudes consecutivas aceptadas sin bloqueo (sin rate limiting)",
             )
         )
 

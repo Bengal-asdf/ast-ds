@@ -58,7 +58,10 @@ def _collect_schema_files(config: Config) -> list[Path]:
 
 def _collect_files(config: Config) -> list[Path]:
     if config.is_dir:
-        return sorted(config.target.rglob("*.py"))
+        return sorted(
+            f for f in config.target.rglob("*.py")
+            if f.name != "__init__.py"
+        )
     else:
         return [config.target]
 
@@ -369,10 +372,19 @@ def _extract_args(
         if arg.arg in SKIP:
             continue
 
-        # Detectar si es un Depends() — saltar
+        # Detectar si es un Depends() — registrar como auth indicator pero no incluir en args
         if arg.annotation is not None:
             ann_str = ast.unparse(arg.annotation)
             if any(dep in ann_str for dep in FASTAPI_DEPS):
+                # Añadir como ArgInfo con anotación "Depends" para que SAST-002 lo detecte
+                arg_infos.append(
+                    ArgInfo(
+                        name=arg.arg,
+                        annotation="Depends",
+                        is_pydantic=False,
+                        source_file=None,
+                    )
+                )
                 continue
 
         annotation_name = None
@@ -404,6 +416,26 @@ def _extract_args(
 
 
 def _extract_function_source(lines: list[str], node: ast.FunctionDef) -> str:
+    """
+    Extrae el código de la función más las variables globales del módulo
+    definidas ANTES de la función (imports, constantes, clientes HTTP).
+    No incluye otras funciones del módulo para evitar contaminación cruzada.
+    """
     start = node.lineno - 1
     end = node.end_lineno if hasattr(node, "end_lineno") else start + 20
-    return "\n".join(lines[start:end])
+    func_source = "\n".join(lines[start:end])
+
+    # Extraer solo imports y variables de cliente HTTP del contexto global
+    # para detectar patrones SSRF y API10 sin contaminar con secrets de otros endpoints
+    import_lines = []
+    for line in lines[:start]:
+        stripped = line.strip()
+        # Solo imports y variables que parecen clientes HTTP o URLs externas
+        if stripped.startswith(("import ", "from ")):
+            import_lines.append(line)
+        elif stripped.startswith(("def ", "class ", "@")):
+            break  # dejar de leer al llegar a primera definición
+
+    import_context = "\n".join(import_lines)
+
+    return func_source + "\n\n# --- imports ---\n" + import_context

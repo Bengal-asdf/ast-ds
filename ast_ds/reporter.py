@@ -22,13 +22,15 @@ SEVERITY_COLORS = {
 STATUS_COLORS = {
     Status.CONFIRMED: "red",
     Status.POTENTIAL: "yellow",
-    Status.NOT_FOUND: "green",
+    Status.NOT_CONFIRMED: "green",
+    Status.INCONCLUSIVE: "dim yellow",
 }
 
 STATUS_LABELS = {
     Status.CONFIRMED: "CONFIRMADO",
     Status.POTENTIAL: "POTENCIAL",
-    Status.NOT_FOUND: "NO DETECTADO",
+    Status.NOT_CONFIRMED: "NO CONFIRMADO",
+    Status.INCONCLUSIVE: "INCONCLUSIVO",
 }
 
 _route_width = 50
