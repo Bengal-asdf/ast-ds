@@ -393,15 +393,23 @@ def _check_resource_consumption(tree: ast.AST, endpoint: Endpoint) -> list[Findi
     # Buscar Field() con restricción le= o ge= en el AST de la función
     has_range_check = _has_field_with_range_constraint(tree)
 
-    # Si el endpoint usa un modelo Pydantic, verificar en el código del modelo
+    # Si el endpoint usa un modelo Pydantic, verificar SOLO ese modelo específico
     if not has_range_check:
         for arg_info in (endpoint.arg_infos or []):
             if arg_info.is_pydantic and arg_info.source_file is not None:
                 try:
                     model_source = arg_info.source_file.read_text(encoding="utf-8")
                     model_tree = ast.parse(model_source)
-                    if _has_field_with_range_constraint(model_tree):
-                        has_range_check = True
+                    # Buscar solo la clase del modelo específico, no todo el archivo
+                    model_name = arg_info.annotation
+                    for node in ast.walk(model_tree):
+                        if isinstance(node, ast.ClassDef) and node.name == model_name:
+                            # Verificar Field con restricción solo en esta clase
+                            class_tree = ast.Module(body=[node], type_ignores=[])
+                            if _has_field_with_range_constraint(class_tree):
+                                has_range_check = True
+                            break
+                    if has_range_check:
                         break
                 except Exception:
                     pass
