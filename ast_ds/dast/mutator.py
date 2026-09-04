@@ -127,21 +127,24 @@ def _resolve_auth_headers(
 
 # ── Punto de entrada ──────────────────────────────────────────────────────────
 
-def _resolve_path_params(path: str) -> str:
+def _resolve_path_params(path: str, id_value: str = "1") -> str:
     """
     Sustituye los path params con valores de prueba válidos.
     ej: /orders/{order_id}/vulnerable → /orders/1/vulnerable
+    id_value permite probar distintos IDs para BOLA.
     """
     import re
     def replace_param(match):
         param_name = match.group(1).lower()
         if "id" in param_name:
-            return "1"
+            return id_value
         if "uuid" in param_name:
-            return "00000000-0000-0000-0000-000000000001"
+            return f"00000000-0000-0000-0000-00000000000{id_value}"
         if "name" in param_name:
             return "test"
-        return "1"
+        if "slug" in param_name:
+            return "test-item"
+        return id_value
     return re.sub(r"\{(\w+)\}", replace_param, path)
 
 
@@ -399,7 +402,7 @@ def _test_bola(
     if not path_params:
         return []
 
-    for test_id in BOLA_ID_PAYLOADS[:3]:
+    for test_id in BOLA_ID_PAYLOADS:
         test_url = url
         for param in path_params:
             test_url = re.sub(r"\{" + param + r"\}", str(test_id), test_url)
@@ -474,10 +477,26 @@ def _test_resource_consumption(
 
             if response.status_code == 200:
                 content_length = len(response.content)
+                # Confirmar si respuesta es grande O si devuelve muchos items JSON
                 if content_length > 50_000:
                     status = Status.CONFIRMED
                 else:
-                    status = Status.POTENTIAL
+                    # Verificar si la respuesta JSON tiene muchos items
+                    try:
+                        json_body = response.json()
+                        if isinstance(json_body, list) and len(json_body) > 100:
+                            status = Status.CONFIRMED
+                        elif isinstance(json_body, dict):
+                            for v in json_body.values():
+                                if isinstance(v, list) and len(v) > 100:
+                                    status = Status.CONFIRMED
+                                    break
+                            else:
+                                status = Status.POTENTIAL
+                        else:
+                            status = Status.POTENTIAL
+                    except Exception:
+                        status = Status.POTENTIAL
             elif response.status_code == 500:
                 # 500 no demuestra consumo no restringido por si solo
                 status = Status.INCONCLUSIVE

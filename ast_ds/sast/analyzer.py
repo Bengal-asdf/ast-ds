@@ -110,17 +110,26 @@ def _check_missing_auth(tree: ast.AST, endpoint: Endpoint) -> list[Finding]:
     auth_keywords = (
         "current_user",
         "get_current_user",
+        "get_current_active_user",
         "verify_token",
+        "validate_token",
+        "decode_token",
         "oauth2_scheme",
         "security",
         "authorize",
         "token",
         "depends",
         "httpbearer",
+        "httpauthorizationcredentials",
         "apikeyheader",
+        "apikeyquery",
         "security_scopes",
         "oauth2",
         "jwt",
+        "bearer",
+        "authenticated",
+        "login_required",
+        "require_auth",
     )
 
     if endpoint.method not in ("POST", "PUT", "PATCH", "DELETE"):
@@ -133,10 +142,17 @@ def _check_missing_auth(tree: ast.AST, endpoint: Endpoint) -> list[Finding]:
             return []
 
     # Verificar en el cuerpo de la función (solo función, no imports)
-    # Extraer solo el código de la función excluyendo el contexto global
     func_source = (endpoint.source_code or "").split("\n\n# ---")[0].lower()
     if any(kw in func_source for kw in auth_keywords):
         return []
+
+    # Verificar en decoradores de la función en el AST
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            for decorator in node.decorator_list:
+                dec_str = ast.unparse(decorator).lower()
+                if any(kw in dec_str for kw in auth_keywords):
+                    return []
 
     return [
         Finding(
@@ -601,8 +617,15 @@ def _check_ssrf(tree: ast.AST, endpoint: Endpoint) -> list[Finding]:
         )
 
         # Caso 2: URL es un atributo de un parámetro (data.url, body.target, etc.)
+        # También detectar atributos con nombres que sugieren URLs
+        url_attr_names = {"url", "uri", "target", "endpoint", "href", "link", "destination", "host", "address", "location"}
         is_attr_of_user_param = (
             isinstance(first_arg, ast.Attribute) and
+            isinstance(first_arg.value, ast.Name) and
+            first_arg.value.id in user_params
+        ) or (
+            isinstance(first_arg, ast.Attribute) and
+            first_arg.attr.lower() in url_attr_names and
             isinstance(first_arg.value, ast.Name) and
             first_arg.value.id in user_params
         )
