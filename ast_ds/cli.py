@@ -47,6 +47,9 @@ def run(timeout: int):
 
     reporter.print_scanning(len(endpoints), endpoints)
 
+    if config.auth:
+        reporter.print_auth_info(config.auth)
+
     # ── 3. Analizar con una tarea por endpoint ────────────────────────────────
     all_findings: list = []
     all_dast: list = []
@@ -58,25 +61,24 @@ def run(timeout: int):
             route = f"{endpoint.method} {endpoint.path}"
             rw = reporter._route_width
 
-            # Crear tarea para este endpoint
             task_id = progress.add_task(
                 description=f"{route:<{rw}}[dim]analizando...[/dim]",
                 total=1,
             )
 
-            # Delay mínimo para que el spinner sea visible
             time.sleep(0.4)
 
             # SAST
             findings = analyzer.analyze(endpoint)
 
-            # DAST
+            # DAST — pasa auth config al mutator
             if findings:
                 dast_results = mutator.mutate(
                     endpoint=endpoint,
                     findings=findings,
                     base_url=config.base_url,
                     timeout=timeout,
+                    auth=config.auth,
                 )
             else:
                 dast_results = []
@@ -84,7 +86,6 @@ def run(timeout: int):
             all_findings.append(findings)
             all_dast.append(dast_results)
 
-            # Resultado final del endpoint
             vuln_count = len(findings)
             if vuln_count == 0:
                 result = f"[green]{'0 vulnerabilidades':<22}[/green]"
